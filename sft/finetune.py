@@ -338,6 +338,19 @@ def extract_alpaca_dataset(example):
         prompt_format = ALPACA_PROMPT_DICT["prompt_no_input"]
     return {'input': prompt_format.format(**example)}
 
+def extract_user_intention_dataset(example):
+    prompt_format = (
+        "You have access to the following function. "
+        "{system} "
+        "Respond to the user AS USUAL if invoking the function does not provide additionally information or the function is unrelated to fullfilling the task. "
+        "If you decide to invoke the function, you MUST put it in the format of "
+        '''{{"function": {{"<name_of_function_to_use>": {{"intent": "true"}}}}}} '''
+        "You SHOULD NOT include any other text in the response if you intent to invoke the function. "
+        
+        "### Instruction:\n{user}\n\n### Response: "
+    )
+    return {'input': prompt_format.format(**example)}
+
 def local_dataset(dataset_name):
     if dataset_name.endswith('.json') or dataset_name.endswith('.jsonl'):
         full_dataset = Dataset.from_json(path_or_paths=dataset_name)
@@ -390,8 +403,8 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             return load_dataset("timdettmers/openassistant-guanaco")
         elif dataset_name == "OpenAssistant/oasst_top1_2023-08-25":
             return load_dataset("OpenAssistant/oasst_top1_2023-08-25")
-        elif dataset_name == "glaiveai/glaive-function-calling-v2":
-            return load_dataset("glaiveai/glaive-function-calling-v2")
+        elif dataset_name == "ZihminWang/user-intention":
+            return load_dataset("ZihminWang/user-intention")
         elif dataset_name == 'vicuna':
             raise NotImplementedError("Vicuna data was not released.")
         else:
@@ -429,11 +442,10 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
                 'input': '',
                 'output': x['text'],
             })
-        elif dataset_format == 'glaiveai/glaive-function-calling-v2' or (dataset_format is None and args.dataset == 'glaiveai/glaive-function-calling-v2'):
+        elif dataset_format == 'ZihminWang/user-intention' or (dataset_format is None and args.dataset == 'ZihminWang/user-intention'):
             dataset = dataset.map(lambda x: {
-                'input': x['system'],
-                'output': x['chat'],
-            })
+                'output': x['assistant'],
+            }, remove_columns = ['assistant']).map(extract_user_intention_dataset, remove_columns = ['system', 'user'])
         elif dataset_format == 'input-output':
             # leave as is
             pass
