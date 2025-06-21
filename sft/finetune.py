@@ -78,6 +78,13 @@ class DataArguments:
             "value if set."
         },
     )
+    max_predict_samples: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "For debugging purposes or quicker training, truncate the number of evaluation examples to this "
+            "value if set."
+        },
+    )
     source_max_len: int = field(
         default=1024,
         metadata={"help": "Maximum source sequence length. Sequences will be right padded (and possibly truncated)."},
@@ -454,7 +461,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     dataset = format_dataset(dataset, args.dataset_format)
  
     # Split train/eval, reduce size
-    if args.do_eval or args.do_predict:
+    if args.do_eval:
         if 'eval' in dataset:
             eval_dataset = dataset['eval']
         else:
@@ -473,6 +480,12 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             train_dataset = train_dataset.select(range(args.max_train_samples))
         if args.group_by_length:
             train_dataset = train_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
+    if args.do_predict:
+        predict_dataset = dataset['test']
+        if args.max_predict_samples is not None and len(predict_dataset) > args.max_predict_samples:
+            predict_dataset = predict_dataset.select(range(args.max_predict_samples))
+        if args.group_by_length:
+            predict_dataset = predict_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
 
     data_collator = DataCollatorForCausalLM(
         tokenizer=tokenizer,
@@ -484,7 +497,7 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
     return dict(
         train_dataset=train_dataset if args.do_train else None,
         eval_dataset=eval_dataset if args.do_eval else None,
-        predict_dataset=eval_dataset if args.do_predict else None,
+        predict_dataset=predict_dataset if args.do_predict else None,
         data_collator=data_collator
     )
 
