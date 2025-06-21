@@ -64,6 +64,9 @@ class DataArguments:
     eval_dataset_size: int = field(
         default=1024, metadata={"help": "Size of validation dataset."}
     )
+    predict_dataset_size: int = field(
+        default=1024, metadata={"help": "Size of prediction dataset."}
+    )
     max_train_samples: Optional[int] = field(
         default=None,
         metadata={
@@ -158,7 +161,11 @@ class GenerationArguments:
     num_beam_groups: Optional[int] = field(default=1)
     penalty_alpha: Optional[float] = field(default=None)
     use_cache: Optional[bool] = field(default=True)
-
+    predict_chunk_size: Optional[int] = field(
+        default=16,
+        metadata={"help": "Max number of samples to generate before freeing Gpu memory."}
+    )
+    
     # Hyperparameters for logit manipulation
     temperature: Optional[float] = field(default=1.0)
     top_k: Optional[int] = field(default=50)
@@ -474,18 +481,25 @@ def make_data_module(tokenizer: transformers.PreTrainedTokenizer, args) -> Dict:
             eval_dataset = eval_dataset.select(range(args.max_eval_samples))
         if args.group_by_length:
             eval_dataset = eval_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
+    if args.do_predict:
+        if 'test' in dataset:
+            predict_dataset = dataset['test']
+        else:
+            print('Splitting train dataset in train and validation according to `eval_dataset_size`')
+            dataset = dataset["train"].train_test_split(
+                test_size=args.predict_dataset_size, shuffle=True, seed=42
+            )
+            predict_dataset = dataset['test']
+        if args.max_predict_samples is not None and len(predict_dataset) > args.max_predict_samples:
+            predict_dataset = predict_dataset.select(range(args.max_predict_samples))
+        if args.group_by_length:
+            predict_dataset = predict_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
     if args.do_train:
         train_dataset = dataset['train']
         if args.max_train_samples is not None and len(train_dataset) > args.max_train_samples:
             train_dataset = train_dataset.select(range(args.max_train_samples))
         if args.group_by_length:
             train_dataset = train_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
-    if args.do_predict:
-        predict_dataset = dataset['test']
-        if args.max_predict_samples is not None and len(predict_dataset) > args.max_predict_samples:
-            predict_dataset = predict_dataset.select(range(args.max_predict_samples))
-        if args.group_by_length:
-            predict_dataset = predict_dataset.map(lambda x: {'length': len(x['input']) + len(x['output'])})
 
     data_collator = DataCollatorForCausalLM(
         tokenizer=tokenizer,
@@ -587,23 +601,96 @@ def train():
         all_metrics.update(metrics)
     # Prediction
     if args.do_predict:
-        logger.info("*** Predict ***")
-        prediction_output = trainer.predict(test_dataset=data_module['predict_dataset'],metric_key_prefix="predict")
-        prediction_metrics = prediction_output.metrics
-        predictions = prediction_output.predictions
-        predictions = np.where(predictions != -100, predictions, tokenizer.pad_token_id)
-        predictions = tokenizer.batch_decode(
-            predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
-        )
-        with open(os.path.join(args.output_dir, 'predictions.jsonl'), 'w') as fout:
-            for i, example in enumerate(data_module['predict_dataset']):
-                example['prediction_with_input'] = predictions[i].strip()
-                example['prediction'] = predictions[i].replace(example['input'], '').strip()
-                fout.write(json.dumps(example) + '\n')
-        print(prediction_metrics)
-        trainer.log_metrics("predict", prediction_metrics)
-        trainer.save_metrics("predict", prediction_metrics)
-        all_metrics.update(prediction_metrics)
+        logger.info("*** Predict (chunked) with Accuracy, Precision, Recall, F1 ***")
+    
+        ds      = data_module['predict_dataset']
+        total   = len(ds)
+        chunk   = args.predict_chunk_size
+        outpath = os.path.join(args.output_dir, "predictions.jsonl")
+    
+        # initialize counters
+        correct = 0
+        count = 0
+        tp = 0
+        fp = 0
+        fn = 0
+    
+        # Stream-predict in small chunks, write, and compute metrics
+        with open(outpath, "w") as fout:
+            for start in range(0, total, chunk):
+                end    = min(start + chunk, total)
+                sub_ds = ds.select(range(start, end))
+    
+                pred_out = trainer.predict(
+                    test_dataset=sub_ds,
+                )
+                preds = pred_out.predictions
+                # if logits, turn into IDs
+                if preds.ndim == 3:
+                    preds = np.argmax(preds, axis=-1)
+                # mask out -100 so decode works
+                preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+    
+                decs = tokenizer.batch_decode(
+                    preds,
+                    skip_special_tokens=True,
+                    clean_up_tokenization_spaces=True,
+                )
+    
+                for i, example in enumerate(sub_ds):
+                    text = decs[i].strip()
+                    input_str  = example.get("input", "")
+                    resp = text[len(input_str):].strip() if text.startswith(input_str) else text
+    
+                    # write predictions
+                    example["prediction_with_input"] = text
+                    example["prediction"] = resp
+                    fout.write(json.dumps(example, ensure_ascii=False) + "\n")
+    
+                    # classification logic
+                    label_str = example.get("output", "").strip()
+                    label_is_func = label_str.startswith('{"function":')
+                    pred_is_func  = resp.startswith('{"function":')
+    
+                    # update counts
+                    if label_is_func:
+                        # positive case
+                        if resp == label_str:
+                            tp += 1
+                            correct += 1
+                        else:
+                            fn += 1
+                    else:
+                        # negative case
+                        if pred_is_func:
+                            fp += 1
+                        else:
+                            correct += 1
+                    count += 1
+    
+                # free memory
+                del pred_out, preds, decs
+                torch.cuda.empty_cache()
+    
+        # compute metrics
+        accuracy = correct / count if count > 0 else 0.0
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = (2 * precision * recall / (precision + recall)) if (precision + recall) > 0 else 0.0
+    
+        # print and save metrics
+        print(f"Prediction accuracy: {accuracy:.4f} ({correct}/{count})")
+        print(f"Precision: {precision:.4f}  Recall: {recall:.4f}  F1: {f1:.4f}")
+    
+        metrics = {
+            "predict_accuracy": accuracy,
+            "predict_precision": precision,
+            "predict_recall": recall,
+            "predict_f1": f1
+        }
+        trainer.log_metrics("predict", metrics)
+        trainer.save_metrics("predict", metrics)
+        all_metrics.update(metrics)
 
     if (args.do_train or args.do_eval or args.do_predict):
         with open(os.path.join(args.output_dir, "metrics.json"), "w") as fout:
