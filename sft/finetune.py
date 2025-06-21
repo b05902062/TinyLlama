@@ -128,6 +128,7 @@ class TrainingArguments(transformers.Seq2SeqTrainingArguments):
     save_strategy: str = field(default='steps', metadata={"help": 'When to save checkpoints'})
     save_steps: int = field(default=250, metadata={"help": 'How often to save a model'})
     save_total_limit: int = field(default=40, metadata={"help": 'How many checkpoints to save before the oldest is overwritten'})
+    load_checkpoint: bool = field(default=True, metadata={"help": 'Use lastest checkpoint as starting point.'})
 
 @dataclass
 class GenerationArguments:
@@ -165,32 +166,25 @@ class GenerationArguments:
 
 
 
-def get_accelerate_model(args, checkpoint_dir):
-
-
-
+def get_accelerate_model(args, checkpoint_dir=None):
+    load_path = checkpoint_dir if checkpoint_dir is not None else args.model_name_or_path
 
     device_map = "auto"
-
     # if we are in a distributed setting, we need to set the device map and max memory per device
     if os.environ.get('LOCAL_RANK') is not None:
         local_rank = int(os.environ.get('LOCAL_RANK', '0'))
         device_map = {'': local_rank}
 
-
-    print(f'loading base model {args.model_name_or_path}...')
+    print(f'loading base model {load_path}...')
     model = AutoModelForCausalLM.from_pretrained(
-        args.model_name_or_path,
+        load_path,
         device_map=device_map,
         trust_remote_code=args.trust_remote_code,
     )
 
-
-
-
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
-        args.model_name_or_path,
+        load_path,
         padding_side="right",
         use_fast=True, # Fast tokenizer giving issues.
         trust_remote_code=args.trust_remote_code,
@@ -519,12 +513,14 @@ def train():
         **vars(model_args), **vars(data_args), **vars(training_args)
     )
     print(args)
-    
-    checkpoint_dir, completed_training = get_last_checkpoint(args.output_dir)
-    if completed_training:
-        print('Detected that training was already completed!')
 
-    model, tokenizer = get_accelerate_model(args, checkpoint_dir)
+    checkpoint_dir = None
+    if args.load_checkpoint:
+        checkpoint_dir, completed_training = get_last_checkpoint(args.output_dir)
+        if completed_training:
+            print('Detected that training was already completed!')
+
+    model, tokenizer = get_accelerate_model(args, checkpoint_dir )
 
     model.config.use_cache = False
     print('loaded model')
