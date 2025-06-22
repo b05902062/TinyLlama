@@ -104,6 +104,10 @@ class DataArguments:
         default=None,
         metadata={"help": "Which dataset format is used. [alpaca|chip2|self-instruct|hh-rlhf]"}
     )
+    predict_chunk_size: Optional[int] = field(
+        default=16,
+        metadata={"help": "Max number of samples to generate before freeing Gpu memory."}
+    )
 
 @dataclass
 class TrainingArguments(transformers.Seq2SeqTrainingArguments):
@@ -161,10 +165,6 @@ class GenerationArguments:
     num_beam_groups: Optional[int] = field(default=1)
     penalty_alpha: Optional[float] = field(default=None)
     use_cache: Optional[bool] = field(default=True)
-    predict_chunk_size: Optional[int] = field(
-        default=16,
-        metadata={"help": "Max number of samples to generate before freeing Gpu memory."}
-    )
     
     # Hyperparameters for logit manipulation
     temperature: Optional[float] = field(default=1.0)
