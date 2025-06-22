@@ -350,11 +350,15 @@ def extract_user_intention_dataset(example):
     prompt_format = (
         "You have access to the following function. "
         "{system} "
-        "Respond to the user AS USUAL if invoking the function does not provide additionally information or the function is unrelated to fullfilling the task. "
+        "Respond to the user AS USUAL if invoking the function won't help the task. "
         "If you decide to invoke the function, you MUST put it in the format of "
         '''{{"function": {{"<name_of_function_to_use>": {{"intent": "true"}}}}}} '''
         "You SHOULD NOT include any other text in the response if you intent to invoke the function. "
         
+        "### Instruction:\n{user}\n\n### Response: "
+    ) if example['system'] != "" else (
+        "You DON'T have access to any functions. "
+        "Respond to the user AS USUAL. "
         "### Instruction:\n{user}\n\n### Response: "
     )
     return {'input': prompt_format.format(**example)}
